@@ -1,0 +1,117 @@
+#!/bin/sh
+
+#
+# Generate Tunnelblick (i.e. OpenVPN client) configuration files.
+#
+# Usage: genconf <my@emailaddr.com>
+#
+
+. `dirname $0`/conf/common.sh
+
+PROGNAME=genconf
+VERSION=1.0
+
+CSR_EMAIL=phillip@signalfuse.com
+
+usage()
+{
+    echo "$PROGNAME $VERSION"
+    echo "Usage: $PROGNAME <your_email_address>"
+}
+
+# Process options
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --help|--usage)
+        usage
+        exit ;;
+    --version)
+        echo "$PROGNAME $VERSION"
+        exit ;;
+    *) export KEY_EMAIL=$1 break ;;
+    esac
+    shift   
+done
+
+check_email
+
+#
+# Create Tunnelblick configuration directory.
+#
+VPC_DIR="$HOME/Library/Application Support/Tunnelblick/Configurations"
+if ! [ -d "$VPC_DIR" ] ; then
+    mkdir -p "$VPC_DIR"
+fi
+
+KEY_CN_FN="$VPC_DIR/$KEY_CN"
+AWS_VPC="aws_vpc.ovpn"
+OPEN_VPN_FN="$VPC_DIR/$AWS_VPC"
+
+#
+# Build the key and certificate request
+#
+export KEY_SIZE KEY_EXPIRE KEY_COUNTRY KEY_PROVINCE KEY_ORG KEY_CITY \
+       KEY_OU KEY_NAME KEY_CN CA_EXPIRE KEY_DIR PKCS11_MODULE_PATH \
+       PKCS11_PIN
+
+# Build a key and corresponding CSR
+{ $OPENSSL req -batch -days $KEY_EXPIRE -nodes -new -newkey rsa:$KEY_SIZE \
+  -keyout "$KEY_CN_FN.key" -out "$KEY_CN_FN.csr" -config "$KEY_CONFIG" ; } || \
+{ exit $? ; }
+
+{ chmod 0600 "$KEY_CN_FN.key" ; }  || { exit $? ; }
+
+# Generate openvpn file
+{ cat <<EOF > $OPEN_VPN_FN ; } || { exit $? ; }
+client
+dev tun
+proto tcp
+remote $OPEN_VPN_GATEWAY 1194
+resolv-retry infinite
+nobind
+persist-key
+persist-tun
+ca ca.crt
+cert $KEY_CN.crt
+key $KEY_CN.key
+ns-cert-type server
+comp-lzo
+verb 3
+EOF
+
+echo "Generated OpenVPN configuration file $OPEN_VPN_FN"
+
+# Email Cerficate Signing Request to a signer.
+BOUNDARY="!ZOLOFT!"
+
+read -r -d '' HEADER <<EOF
+[Certificate Signing Request]
+From: $KEY_CN <$KEY_EMAIL>
+Reply-to: $KEY_EMAIL
+Content-Type: multipart/mixed; boundary=$BOUNDARY
+EOF
+
+(cat <<EOF
+--$BOUNDARY
+Content-Type: text/plain; charset=us-ascii; name=$KEY_CN.csr
+Content-Disposition: attachment; filename=$KEY_CN.csr
+Content-Transfer-Encoding: quoted-printable
+
+`cat "$KEY_CN_FN.csr"`
+
+--$BOUNDARY--
+EOF
+) | { mail -s "$HEADER" $CSR_EMAIL ; } || { exit $? ; }
+
+rm "$KEY_CN_FN.csr"
+echo "Emailed certifidate signing request to $CSR_EMAIL"
+
+cat <<EOF
+
+==========
+==========
+You're almost done.  An OpenVPN configuration file, $AWS_VPC, has been created and a private key, $KEY_CN.key, generated.  Both files are in $VPC_DIR.  A certificate signing request for a corresponding X509 certificate has been sent to a signing authority.  You will shortly recieve a response email with subject line 're: [Certificate Signing Request]'.  The email will contain two attachments: ca.crt and $KEY_CN.crt.  Save both attachments to $VPC_DIR - Tunnelblick's configuration directory.  Then start Tunnelblick and select 'aws_vpc' configuration and connect.
+==========
+==========
+
+EOF

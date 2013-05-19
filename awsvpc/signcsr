@@ -1,0 +1,82 @@
+#!/bin/sh
+
+#
+# Create a signed certificate from a CSR
+#
+# Usage: signcsr <csr_file_name> <requester_email_address>
+#
+
+# Database of generated certfificates, certificate serial number, and
+# Cerifiate authority.  This database is only available on the signing
+# server.
+KEY_DIR=~/tools/openvpn/keys
+
+. `dirname $0`/conf/common.sh
+
+PROGNAME=signcsr
+VERSION=1.0
+
+usage()
+{
+    echo "$PROGNAME $VERSION"
+    echo "Usage: $PROGNAME <csr_file_name> <requester_email_address>"
+}
+
+# Process options
+for i in "$@" ; do
+    case "$1" in
+    --help|--usage)
+        usage
+        exit ;;
+    --version)
+        echo "$PROGNAME $VERSION"
+        exit ;;
+    *) export CSR_FN=$1 KEY_EMAIL=$2 break ;;
+    esac
+done
+
+check_email
+
+if ! [ -r "$CSR_FN" ]; then
+    die "Certificate signing request (CSR) file $CSR_FN could not be found."
+fi
+
+# Build the key and certificate request
+export KEY_SIZE KEY_EXPIRE KEY_COUNTRY KEY_PROVINCE KEY_ORG KEY_CITY \
+       KEY_OU KEY_NAME KEY_CN CA_EXPIRE KEY_DIR PKCS11_MODULE_PATH \
+       PKCS11_PIN
+
+# Build crt
+{ $OPENSSL ca -batch -days $KEY_EXPIRE -out "$KEY_CN.crt" \
+   -in "$CSR_FN" $CA_EXT -config "$KEY_CONFIG" ; } || { exit $? ; } 
+
+# Email Cerficate Signing Request to a signer.
+BOUNDARY="!ZOLOFT!"
+
+read -r -d '' HEADER <<EOF
+re:[Certificate Signing Request]
+From: Cerficate Signer <noreply@signalfuse.com>
+Reply-to: noreply@signalfuse.com
+Content-Type: multipart/mixed; boundary=$BOUNDARY
+EOF
+
+(cat <<EOF
+--$BOUNDARY
+Content-Type: text/plain; charset=us-ascii; name=ca.crt
+Content-Disposition: attachment; filename=ca.crt
+Content-Transfer-Encoding: quoted-printable
+
+`cat $KEY_DIR/ca.crt`
+
+--$BOUNDARY
+Content-Type: text/plain; charset=us-ascii; name=$KEY_CN.crt
+Content-Disposition: attachment; filename=$KEY_CN.crt
+Content-Transfer-Encoding: quoted-printable
+
+`cat $KEY_CN.crt`
+
+--$BOUNDARY--
+EOF
+) | { mail -s "$HEADER" $KEY_EMAIL ; } || { exit $? ; }
+
+echo "\nEmailed $KEY_DIR/ca.crt and $KEY_CN.crt to $KEY_EMAIL"
